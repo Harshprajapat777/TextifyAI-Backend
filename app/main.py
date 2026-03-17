@@ -5,7 +5,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import settings
 from app.services.nlp_service import nlp_service
-from app.routes import spellcheck, predict, chat, files
+from app.routes import spellcheck, predict, chat, files, coherence
 
 
 @asynccontextmanager
@@ -36,6 +36,7 @@ app.include_router(spellcheck.router, prefix="/api")
 app.include_router(predict.router, prefix="/api")
 app.include_router(chat.router, prefix="/api")
 app.include_router(files.router, prefix="/api")
+app.include_router(coherence.router, prefix="/api")
 
 
 @app.get("/")
