@@ -27,5 +27,10 @@ async def predict(body: PredictRequest):
             detail=f"Invalid role '{body.role}'. Must be one of: {VALID_ROLES}",
         )
 
+    # Require at least 4 words before generating predictions
+    word_count = len(body.text.strip().split())
+    if word_count < 4:
+        return PredictResponse(predictions=[])
+
     predictions = await get_predictions(body.text, body.role, body.count)
     return PredictResponse(predictions=predictions)

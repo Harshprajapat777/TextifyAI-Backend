@@ -1,9 +1,11 @@
-import os
+import csv
+import io
 import uuid
 import asyncio
 from pathlib import Path
 
 import chardet
+import pypdf
 
 from app.config import settings
 from app.services.nlp_service import nlp_service
@@ -53,6 +55,29 @@ def _update_step(job_id: str, step: int, status: str = "processing"):
     job["stepLabel"] = STEPS[step - 1] if 1 <= step <= len(STEPS) else ""
 
 
+def _extract_text(file_bytes: bytes, filename: str) -> str:
+    """Extract plain text from .txt, .pdf, or .csv files."""
+    ext = Path(filename).suffix.lower()
+
+    if ext == ".pdf":
+        reader = pypdf.PdfReader(io.BytesIO(file_bytes))
+        return "\n".join(
+            page.extract_text() or "" for page in reader.pages
+        )
+
+    if ext == ".csv":
+        detected = chardet.detect(file_bytes)
+        encoding = detected.get("encoding") or "utf-8"
+        text = file_bytes.decode(encoding, errors="replace")
+        reader = csv.reader(io.StringIO(text))
+        return "\n".join(" ".join(row) for row in reader)
+
+    # Default: plain text
+    detected = chardet.detect(file_bytes)
+    encoding = detected.get("encoding") or "utf-8"
+    return file_bytes.decode(encoding, errors="replace")
+
+
 async def process_file(job_id: str, file_bytes: bytes):
     """Run the full spell-check pipeline in the background."""
     upload_dir = _get_upload_dir()
@@ -60,18 +85,14 @@ async def process_file(job_id: str, file_bytes: bytes):
     try:
         # Step 1: Read and parse file
         _update_step(job_id, 1, "analyzing")
-        await asyncio.sleep(0.3)  # small delay so frontend can poll
-
-        detected = chardet.detect(file_bytes)
-        encoding = detected.get("encoding") or "utf-8"
-        text = file_bytes.decode(encoding, errors="replace")
-        lines = text.splitlines()
+        await asyncio.sleep(0.3)
 
         job = _jobs[job_id]
-        words = text.split()
-        job["totalWords"] = len(words)
+        text = _extract_text(file_bytes, job["fileName"])
+        lines = text.splitlines()
+        job["totalWords"] = len(text.split())
 
-        # Save original file
+        # Save original as txt
         original_path = upload_dir / f"{job_id}_original.txt"
         original_path.write_text(text, encoding="utf-8")
 
@@ -81,12 +102,10 @@ async def process_file(job_id: str, file_bytes: bytes):
 
         corrections = []
         for line_num, line in enumerate(lines, start=1):
-            line_corrections = nlp_service.check_text(line)
-            for c in line_corrections:
+            for c in nlp_service.check_text(line):
                 corrections.append({
                     "original": c["word"],
-                    "corrected": c["suggestions"][0] if c["suggestions"] else c["word"],
-                    "suggestions": c["suggestions"],
+                    "corrected": c["correction"],
                     "line": line_num,
                 })
 
@@ -97,16 +116,12 @@ async def process_file(job_id: str, file_bytes: bytes):
         _update_step(job_id, 3, "correcting")
         await asyncio.sleep(0.2)
 
-        corrected_text = text
-        # Apply corrections in reverse offset order per line to preserve positions
         for line_num, line in enumerate(lines, start=1):
             line_corrections = nlp_service.check_text(line)
-            # Sort by offset descending so replacements don't shift positions
             for c in sorted(line_corrections, key=lambda x: x["offset"], reverse=True):
-                if c["suggestions"]:
-                    start = c["offset"]
-                    end = start + len(c["word"])
-                    line = line[:start] + c["suggestions"][0] + line[end:]
+                start = c["offset"]
+                end = start + c["length"]
+                line = line[:start] + c["correction"] + line[end:]
             lines[line_num - 1] = line
 
         corrected_text = "\n".join(lines)

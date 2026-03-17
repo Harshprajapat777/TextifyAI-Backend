@@ -7,6 +7,7 @@ from pydantic import BaseModel
 from app.services.llm_service import (
     get_chat_reply,
     stream_chat_reply,
+    get_structured_chat_reply,
     ROLE_SYSTEM_PROMPTS,
 )
 
@@ -51,11 +52,29 @@ async def chat_stream(body: ChatRequest):
         )
 
     async def event_generator():
-        async for token in stream_chat_reply(
+        result = await get_structured_chat_reply(
             body.role, [m.model_dump() for m in body.messages]
-        ):
-            yield f"data: {json.dumps({'token': token})}\n\n"
-        yield f"data: {json.dumps({'done': True})}\n\n"
+        )
+
+        if result.get("type") == "chat":
+            # Casual message — emit a single message event
+            yield (
+                f"event: message\n"
+                f"data: {json.dumps({'text': result.get('text', '')})}\n\n"
+            )
+        else:
+            # Informational — emit description then numbered points
+            yield (
+                f"event: description\n"
+                f"data: {json.dumps({'text': result.get('description', '')})}\n\n"
+            )
+            for index, point in enumerate(result.get("points", []), start=1):
+                yield (
+                    f"event: point\n"
+                    f"data: {json.dumps({'index': index, 'text': point})}\n\n"
+                )
+
+        yield "event: done\ndata: {}\n\n"
 
     return StreamingResponse(
         event_generator(),

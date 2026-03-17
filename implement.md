@@ -83,34 +83,47 @@ const data = await api("/spellcheck", {
       "offset": 12,
       "length": 10
     }
-  ]
+  ],
+  "auto_corrected_text": "The receive definitely"
 }
 ```
 
-| Field                       | Type     | Description                                       |
-| --------------------------- | -------- | ------------------------------------------------- |
-| `corrections`               | `array`  | List of misspelled words                          |
-| `corrections[].word`        | `string` | The misspelled word                               |
-| `corrections[].correction`  | `string` | Single best correction (tap to replace)            |
-| `corrections[].offset`      | `number` | Character offset in the original text             |
-| `corrections[].length`      | `number` | Length of the misspelled word (for underline span) |
+| Field                       | Type     | Description                                         |
+| --------------------------- | -------- | --------------------------------------------------- |
+| `corrections`               | `array`  | List of misspelled words (empty if no errors found) |
+| `corrections[].word`        | `string` | The misspelled word                                 |
+| `corrections[].correction`  | `string` | Single best correction                              |
+| `corrections[].offset`      | `number` | Character offset in the original text               |
+| `corrections[].length`      | `number` | Length of the misspelled word (for underline span)  |
+| `auto_corrected_text`       | `string` | Full text with all corrections applied              |
 
 #### Frontend Usage Example
 
 ```jsx
 // Real-time spell check on typing (debounce 300ms)
 const checkSpelling = async (text) => {
-  const { corrections } = await api("/spellcheck", { text });
-  // Use offset + length to place red underline
-  // Show correction as single-word chip (like Grammarly)
-  // On tap → replace text[offset:offset+length] with correction
-  return corrections;
+  const { corrections, auto_corrected_text } = await api("/spellcheck", { text });
+
+  if (corrections.length === 0) {
+    // No errors — clear any existing highlights
+    return;
+  }
+
+  // 1. Highlight misspelled words using offset + length
+  //    Render a red underline over text[offset : offset + length] for each correction
+  highlightMisspelledWords(text, corrections);
+
+  // 2. Auto-fix: update the editor content with the corrected text
+  setEditorText(auto_corrected_text);
 };
 
-// Replace word on tap
-const applyCorrection = (text, correction) => {
-  const { offset, length, correction: fix } = correction;
-  return text.slice(0, offset) + fix + text.slice(offset + length);
+// Example: build highlight spans from corrections
+const highlightMisspelledWords = (text, corrections) => {
+  // corrections are sorted by offset so you can build spans in order
+  corrections.forEach(({ word, correction, offset, length }) => {
+    // Mark text[offset : offset + length] with a red underline
+    // Show a tooltip/chip with `correction` value on hover or tap
+  });
 };
 ```
 
@@ -159,14 +172,26 @@ const data = await api("/predict", {
 #### Frontend Usage Example
 
 ```jsx
-// Show as suggestion chips below the text editor
+// Trigger predictions only when user has typed at least 4 words
+// The backend enforces this too — returns [] for fewer than 4 words
 const getPredictions = async (text, role) => {
-  if (text.trim().length < 3) return []; // skip short input
+  const wordCount = text.trim().split(/\s+/).filter(Boolean).length;
+  if (wordCount < 4) return []; // skip — not enough words yet
   const { predictions } = await api("/predict", { text, role, count: 5 });
-  // predictions → render as clickable chips
-  // on click → append selected prediction to editor
   return predictions;
 };
+
+// Render predictions as a vertical list below the editor (not inline chips)
+// Example JSX:
+// <ul className="prediction-list">
+//   {predictions.map((p, i) => (
+//     <li key={i} onClick={() => setEditorText(p)} className="prediction-item">
+//       {p}
+//     </li>
+//   ))}
+// </ul>
+//
+// On click → replace/set editor text with the selected prediction
 ```
 
 ---
@@ -207,12 +232,60 @@ const data = await api("/chat", {
 
 **`POST /api/chat/stream`**
 
-Same request body as `/api/chat`. Returns Server-Sent Events for real-time typing effect.
+Same request body as `/api/chat`. Returns structured Server-Sent Events — first a short description, then numbered points one by one.
+
+#### SSE Event Types
+
+The backend automatically detects whether the message is casual or informational and picks the right format.
+
+**Casual messages** (greetings, small talk):
+
+| Event     | Data shape              | When        |
+| --------- | ----------------------- | ----------- |
+| `message` | `{ "text": "..." }`     | Single reply|
+| `done`    | `{}`                    | Last event  |
+
+**Informational questions:**
+
+| Event         | Data shape                         | When           |
+| ------------- | ---------------------------------- | -------------- |
+| `description` | `{ "text": "One-line overview." }` | First event    |
+| `point`       | `{ "index": 1, "text": "..." }`    | Once per point |
+| `done`        | `{}`                               | Last event     |
+
+#### Raw SSE Stream Examples
+
+Casual:
+```
+event: message
+data: {"text": "Hello! How can I help you today?"}
+
+event: done
+data: {}
+```
+
+Informational:
+```
+event: description
+data: {"text": "Iron deficiency causes several notable physical symptoms."}
+
+event: point
+data: {"index": 1, "text": "Persistent fatigue and low energy levels."}
+
+event: point
+data: {"index": 2, "text": "Pale or yellowish skin tone."}
+
+event: point
+data: {"index": 3, "text": "Shortness of breath during mild activity."}
+
+event: done
+data: {}
+```
 
 #### Frontend Usage Example
 
 ```js
-const streamChat = async (role, messages, onToken, onDone) => {
+const streamChat = async (role, messages, handlers) => {
   const res = await fetch(`${API_BASE}/chat/stream`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -222,6 +295,7 @@ const streamChat = async (role, messages, onToken, onDone) => {
   const reader = res.body.getReader();
   const decoder = new TextDecoder();
   let buffer = "";
+  let currentEvent = "";
 
   while (true) {
     const { done, value } = await reader.read();
@@ -229,26 +303,29 @@ const streamChat = async (role, messages, onToken, onDone) => {
 
     buffer += decoder.decode(value, { stream: true });
     const lines = buffer.split("\n");
-    buffer = lines.pop(); // keep incomplete line in buffer
+    buffer = lines.pop();
 
     for (const line of lines) {
-      if (line.startsWith("data: ")) {
+      if (line.startsWith("event: ")) {
+        currentEvent = line.slice(7).trim();
+      } else if (line.startsWith("data: ")) {
         const data = JSON.parse(line.slice(6));
-        if (data.done) {
-          onDone();
-        } else {
-          onToken(data.token); // append token to UI
-        }
+        if (currentEvent === "message")     handlers.onMessage(data.text);
+        if (currentEvent === "description") handlers.onDescription(data.text);
+        if (currentEvent === "point")       handlers.onPoint(data.index, data.text);
+        if (currentEvent === "done")        handlers.onDone();
       }
     }
   }
 };
 
 // Usage
-streamChat("doctor", messages,
-  (token) => setReply(prev => prev + token),
-  () => setIsTyping(false)
-);
+streamChat("doctor", messages, {
+  onMessage:     (text) => setChatReply(text),               // casual reply
+  onDescription: (text) => setDescription(text),             // informational
+  onPoint:       (index, text) => setPoints(prev => [...prev, { index, text }]),
+  onDone:        () => setStreaming(false),
+});
 ```
 
 ---

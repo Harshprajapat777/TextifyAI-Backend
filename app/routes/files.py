@@ -44,11 +44,18 @@ class ReportResponse(BaseModel):
     corrections: list[CorrectionItem]
 
 
+ALLOWED_EXTENSIONS = {".txt", ".pdf", ".csv"}
+
+
 @router.post("/files/upload", response_model=UploadResponse)
 async def upload_file(background_tasks: BackgroundTasks, file: UploadFile = File(...)):
     # Validate file type
-    if not file.filename.endswith(".txt"):
-        raise HTTPException(status_code=400, detail="Only .txt files are supported")
+    ext = "." + file.filename.rsplit(".", 1)[-1].lower() if "." in file.filename else ""
+    if ext not in ALLOWED_EXTENSIONS:
+        raise HTTPException(
+            status_code=400,
+            detail="Only .txt, .pdf, and .csv files are supported",
+        )
 
     # Read and validate size
     file_bytes = await file.read()
@@ -92,7 +99,8 @@ async def download_file(job_id: str):
     if not path:
         raise HTTPException(status_code=404, detail="Corrected file not found")
 
-    corrected_name = job["fileName"].replace(".txt", "_corrected.txt")
+    base = job["fileName"].rsplit(".", 1)[0]
+    corrected_name = f"{base}_corrected.txt"
     return FileResponse(
         path=str(path),
         filename=corrected_name,
